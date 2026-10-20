@@ -470,13 +470,13 @@ const Data = {
   fref(k) { return this.fs.doc(this.fsdb, 'users', FB.user.uid, 'lernflug', k); },
   async get(k, d) {
     const lk = this.prefix + k;
-    if (this.mode === 'db') { try { const s = await this.ref(k).get(); return s.exists ? clone(s.data()) : d; } catch (e) { return local.get(lk, d); } }
+    if (this.mode === 'db') { try { const s = await this.ref(k).get(); return s.exists ? clone(s.data()) : local.get(lk, d); } catch (e) { return local.get(lk, d); } }
     if (this.mode === 'firestore') { try { const s = await this.fs.getDoc(this.fref(k)); return s.exists() ? clone(s.data()) : d; } catch (e) { return local.get(lk, d); } }
     return local.get(lk, d);
   },
   async set(k, v) {
     local.set(this.prefix + k, v);
-    if (this.mode === 'db') { try { await this.ref(k).set(clone(v)); } catch (e) {} }
+    if (this.mode === 'db') { try { await this.ref(k).set(clone(v)); } catch (e) { this.mode = 'local'; this.warn = true; } }
     if (this.mode === 'firestore') { try { await this.fs.setDoc(this.fref(k), clone(v)); } catch (e) { console.warn('[Lernflug] Speichern fehlgeschlagen', e && e.code); } }
   },
   async del(k) {
