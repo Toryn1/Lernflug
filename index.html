@@ -60,7 +60,7 @@ p { margin: 0; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .between { justify-content: space-between; }
-input[type="text"], input[type="date"], input[type="time"], select, textarea { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; min-width: 0; }
+input[type="text"], input[type="password"], input[type="date"], input[type="time"], select, textarea { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; min-width: 0; }
 textarea { min-height: 70px; resize: vertical; }
 select.inline { width: auto; }
 .chip { font: inherit; font-size: .875rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 99px; padding: 5px 12px; cursor: pointer; }
@@ -191,6 +191,27 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     <span class="logo">Lern<span>flug</span></span>
     <span class="muted small" id="topRight">Clips schauen, Fragen beantworten</span>
   </header>
+
+  <!-- LOGIN (nur Website) -->
+  <section class="screen" id="auth" hidden>
+    <div>
+      <h1>Willkommen bei Lernflug</h1>
+      <p class="muted" style="margin-top:6px">Vorlesungen und Themen als kurze Clips, Fragen dazu und ein Kalender für deine Prüfungen. Melde dich an, um zu starten.</p>
+    </div>
+    <div class="card">
+      <div class="seg" id="authMode" role="group" aria-label="Anmelden oder Konto erstellen">
+        <button type="button" data-v="in" aria-pressed="true">Anmelden</button><button type="button" data-v="up" aria-pressed="false">Konto erstellen</button>
+      </div>
+      <form id="authForm" class="screen" style="gap:12px" novalidate>
+        <div class="field"><label for="authEmail">E-Mail</label><input type="text" inputmode="email" id="authEmail" autocomplete="email" placeholder="name@students.ch"></div>
+        <div class="field"><label for="authPass">Passwort</label><input type="password" id="authPass" autocomplete="current-password" placeholder="Mindestens 6 Zeichen"></div>
+        <p class="hint err" id="authErr" aria-live="polite"></p>
+        <button class="btn primary block" id="authSubmit" type="submit">Anmelden</button>
+      </form>
+      <button class="btn secondary block" id="authGoogle" type="button">Mit Google anmelden</button>
+      <button class="linkbtn" id="authReset" type="button">Passwort vergessen?</button>
+    </div>
+  </section>
 
   <section class="screen" id="boot"><div class="loading"><span class="spinner"></span><span>Lädt …</span></div></section>
 
@@ -334,6 +355,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
       <label class="toggle"><span>Motivations-Nachrichten<br><span class="muted small">Kurze Hinweise zu Serie und Tagesziel</span></span><input type="checkbox" id="setMot"></label>
       <div class="toggle"><label for="setGoal">Tagesziel</label><select id="setGoal" class="inline"><option value="5">5 Fragen</option><option value="10">10 Fragen</option><option value="20">20 Fragen</option><option value="30">30 Fragen</option></select></div>
     </div>
+    <div class="card" id="accountCard" hidden>
+      <h3>Konto</h3>
+      <p class="muted small" id="accountEmail"></p>
+      <button class="btn secondary" id="logoutBtn" type="button">Abmelden</button>
+    </div>
     <div class="card">
       <h3>Daten</h3>
       <p class="muted small" id="storeInfo"></p>
@@ -418,9 +444,11 @@ const local = {
 };
 
 // ---------- Speicher: pro Person (db) oder nur dieser Browser ----------
+const IN_CLAUDE = !!(window.claude && window.claude.use);
 const Data = {
-  mode: 'local', db: null, uid: null,
+  mode: 'local', db: null, uid: null, fs: null, fsdb: null, prefix: '', warn: false,
   async init() {
+    if (FB.user) return this.initFirebase();
     try {
       if (!(window.claude && window.claude.use)) return;
       const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
@@ -428,16 +456,34 @@ const Data = {
       if (db && id) { this.db = db; this.uid = id; this.mode = 'db'; }
     } catch (e) {}
   },
+  async initFirebase() {
+    this.prefix = FB.user.uid + ':'; this.mode = 'local'; this.warn = true;
+    try {
+      const F = await import(FB.base + '/firebase-firestore.js');
+      const fsdb = F.getFirestore(FB.app);
+      const probe = F.getDoc(F.doc(fsdb, 'users', FB.user.uid, 'lernflug', 'profile'));
+      await Promise.race([probe, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000))]);
+      this.fs = F; this.fsdb = fsdb; this.mode = 'firestore'; this.warn = false;
+    } catch (e) { console.warn('[Lernflug] Firestore nicht verfügbar, speichere im Browser:', e && (e.code || e.message)); }
+  },
   ref(k) { return this.db.doc('data/users/' + this.uid + '/' + k); },
+  fref(k) { return this.fs.doc(this.fsdb, 'users', FB.user.uid, 'lernflug', k); },
   async get(k, d) {
-    if (this.mode === 'db') { try { const s = await this.ref(k).get(); return s.exists ? clone(s.data()) : d; } catch (e) { return local.get(k, d); } }
-    return local.get(k, d);
+    const lk = this.prefix + k;
+    if (this.mode === 'db') { try { const s = await this.ref(k).get(); return s.exists ? clone(s.data()) : d; } catch (e) { return local.get(lk, d); } }
+    if (this.mode === 'firestore') { try { const s = await this.fs.getDoc(this.fref(k)); return s.exists() ? clone(s.data()) : d; } catch (e) { return local.get(lk, d); } }
+    return local.get(lk, d);
   },
   async set(k, v) {
-    local.set(k, v);
+    local.set(this.prefix + k, v);
     if (this.mode === 'db') { try { await this.ref(k).set(clone(v)); } catch (e) {} }
+    if (this.mode === 'firestore') { try { await this.fs.setDoc(this.fref(k), clone(v)); } catch (e) { console.warn('[Lernflug] Speichern fehlgeschlagen', e && e.code); } }
   },
-  async del(k) { local.del(k); if (this.mode === 'db') { try { await this.ref(k).delete(); } catch (e) {} } }
+  async del(k) {
+    local.del(this.prefix + k);
+    if (this.mode === 'db') { try { await this.ref(k).delete(); } catch (e) {} }
+    if (this.mode === 'firestore') { try { await this.fs.deleteDoc(this.fref(k)); } catch (e) {} }
+  }
 };
 const saveQ = {};
 function save(k, v) { saveQ[k] = (saveQ[k] || Promise.resolve()).then(() => Data.set(k, v)); return saveQ[k]; }
@@ -559,12 +605,12 @@ $('#pfSave').onclick = async () => {
 };
 
 // ---------- App-Rahmen ----------
-const SCREENS = ['#boot', '#welcome', '#tabLearn', '#tabCal', '#tabProfile', '#player', '#done'];
+const SCREENS = ['#auth', '#boot', '#welcome', '#tabLearn', '#tabCal', '#tabProfile', '#player', '#done'];
 function showScreen(id) { SCREENS.forEach(s => $(s).hidden = s !== id); if (id !== '#player') vid.pause(); window.scrollTo(0, 0); }
 let currentTab = 'tabLearn';
 function openTab(t) {
   currentTab = t; showScreen('#' + t); $('#tabbar').hidden = false;
-  document.querySelectorAll('.tabbar button').forEach(b => b.dataset.tab === t ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'));
+  document.querySelectorAll('.tabbar button').forEach(b => b.toggleAttribute('aria-current', b.dataset.tab === t) || b.dataset.tab === t && b.setAttribute('aria-current', 'page'));
   if (t === 'tabLearn') renderLearn(); if (t === 'tabCal') renderCal(); if (t === 'tabProfile') renderProfile();
 }
 document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => openTab(b.dataset.tab));
@@ -687,8 +733,26 @@ async function renderSuggestions() {
 
 // ---------- KI ----------
 let sampleP = null;
+const GEMINI_MODEL = 'gemini-2.5-flash';
+const blobToB64 = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(b); });
+async function firebaseSample() {
+  const AI = await import(FB.base + '/firebase-ai.js');
+  const ai = AI.getAI(FB.app, { backend: new AI.GoogleAIBackend() });
+  const model = AI.getGenerativeModel(ai, { model: GEMINI_MODEL, generationConfig: { responseMimeType: 'application/json' } });
+  return {
+    limits: async () => ({ images: true }),
+    json: async (prompt, opts = {}) => {
+      const parts = [{ text: prompt }];
+      for (const b of opts.images || []) parts.push({ inlineData: { mimeType: b.type || 'image/jpeg', data: await blobToB64(b) } });
+      const r = await model.generateContent(parts);
+      const t = r.response.text(), m = t.match(/[\[{][\s\S]*[\]}]/);
+      return JSON.parse(m ? m[0] : t);
+    }
+  };
+}
 function getSample() {
-  if (!sampleP) sampleP = (window.claude && window.claude.use) ? window.claude.use('sample').catch(() => null) : Promise.resolve(null);
+  if (!sampleP) sampleP = IN_CLAUDE ? window.claude.use('sample').catch(() => null)
+    : FB.app ? firebaseSample().catch(e => { console.warn('[Lernflug] KI nicht verfügbar', e); return null; }) : Promise.resolve(null);
   return sampleP;
 }
 const ytUrl = q => 'https://www.youtube.com/results?search_query=' + encodeURIComponent(q);
@@ -854,7 +918,9 @@ $('#startBtn').onclick = async () => {
   try { startSet(await planTopic(topic, +$('#clipCount').value)); hint.textContent = ''; }
   catch (e) {
     hint.className = 'hint err';
-    hint.textContent = e && e.message === 'no-ai' ? 'Für Themen braucht die App die KI. Erlaube den Zugriff, wenn danach gefragt wird, und versuch es nochmal.' : 'Das hat nicht geklappt. Versuch es nochmal oder formuliere das Thema etwas genauer.';
+    hint.textContent = e && e.message === 'no-ai' ? (IN_CLAUDE ? 'Für Themen braucht die App die KI. Erlaube den Zugriff, wenn danach gefragt wird, und versuch es nochmal.' : 'Die KI ist gerade nicht erreichbar. Versuch es später nochmal.')
+      : 'Das hat nicht geklappt. Versuch es nochmal oder formuliere das Thema etwas genauer.';
+    if (e && e.message !== 'empty') console.warn('[Lernflug] Lernpfad fehlgeschlagen', e);
   }
   btn.disabled = false; btn.textContent = 'Starten';
 };
@@ -1070,7 +1136,8 @@ function renderProfile() {
     .forEach(([k, val]) => v.append(el('dt', null, k), el('dd', null, val)));
   const s = settings();
   $('#setRemind').checked = s.remind; $('#setMot').checked = s.mot; $('#setGoal').value = String(s.goal);
-  $('#storeInfo').textContent = Data.mode === 'db' ? 'Profil, Kalender und Fortschritt sind mit deinem Konto gespeichert und nur für dich sichtbar.' : 'Profil, Kalender und Fortschritt sind nur in diesem Browser gespeichert.';
+  $('#accountCard').hidden = !FB.user; if (FB.user) $('#accountEmail').textContent = 'Angemeldet als ' + (FB.user.email || FB.user.displayName || 'Nutzer');
+  $('#storeInfo').textContent = Data.mode === 'firestore' ? 'Profil, Kalender und Fortschritt sind in deinem Konto gespeichert und auf allen Geräten verfügbar.' : Data.warn ? 'Das Speichern im Konto ist noch nicht eingerichtet. Deine Daten liegen vorerst nur in diesem Browser.' : Data.mode === 'db' ? 'Profil, Kalender und Fortschritt sind mit deinem Konto gespeichert und nur für dich sichtbar.' : 'Profil, Kalender und Fortschritt sind nur in diesem Browser gespeichert.';
   $('#wipeConfirm').hidden = true; $('#wipe').hidden = false;
 }
 const setSetting = (k, v) => { profile.settings = Object.assign({}, settings(), { [k]: v }); save('profile', profile); updateBadge(); };
@@ -1086,13 +1153,84 @@ $('#wipeYes').onclick = async () => {
   ['#pfName', '#pfHs', '#pfStudy'].forEach(s => $(s).value = '');
   $('#topRight').textContent = 'Clips schauen, Fragen beantworten'; openWelcome(false);
 };
+$('#logoutBtn').onclick = () => FB.signOut && FB.signOut();
 
 // ---------- Start ----------
-(async () => {
+async function boot() {
+  showScreen('#boot');
   await Data.init();
   const [p, ev, st, sn] = await Promise.all([Data.get('profile', null), Data.get('events', { items: [] }), Data.get('stats', null), Data.get('seen', {})]);
   profile = p; events = Array.isArray(ev && ev.items) ? ev.items : []; stats = st && st.days ? st : { days: {}, answered: 0, right: 0 }; seen = sn || {};
   const t = todayStr(); Object.keys(seen).forEach(k => { if (!k.endsWith('@' + t)) delete seen[k]; });
-  if (profile) enterApp('tabLearn'); else openWelcome(false);
-})();
+  if (profile && FB.user && !profile.name && FB.user.displayName) profile.name = FB.user.displayName.split(' ')[0];
+  if (profile) enterApp('tabLearn'); else { if (FB.user && FB.user.displayName && !$('#pfName').value) $('#pfName').value = FB.user.displayName.split(' ')[0]; openWelcome(false); }
+}
+
+// ---------- Login mit Firebase (nur auf der Website, nicht in der Claude-Ansicht) ----------
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyD5xeLjBt5npCYSJNOT6hWTdNLyMyeU0R4",
+  authDomain: "clipjaeger-be306.firebaseapp.com",
+  projectId: "clipjaeger-be306",
+  storageBucket: "clipjaeger-be306.firebasestorage.app",
+  messagingSenderId: "337111813730",
+  appId: "1:337111813730:web:87e24fc3bb9350d3d8cb3b"
+};
+const FB = { base: 'https://www.gstatic.com/firebasejs/12.0.0', app: null, user: null, signOut: null };
+async function startWebsite() {
+  showScreen('#auth'); $('#tabbar').hidden = true;
+  let A, auth;
+  try {
+    const { initializeApp } = await import(FB.base + '/firebase-app.js');
+    A = await import(FB.base + '/firebase-auth.js');
+    FB.app = initializeApp(FIREBASE_CONFIG); auth = A.getAuth(FB.app); auth.languageCode = 'de';
+    FB.signOut = () => A.signOut(auth);
+  } catch (e) {
+    $('#authErr').textContent = 'Der Login konnte nicht geladen werden. Prüfe deine Internetverbindung und lade die Seite neu.';
+    document.querySelectorAll('#auth button, #auth input').forEach(x => x.disabled = true);
+    return;
+  }
+  const MSG = {
+    'auth/invalid-credential': 'E-Mail oder Passwort ist falsch.', 'auth/wrong-password': 'E-Mail oder Passwort ist falsch.', 'auth/user-not-found': 'Zu dieser E-Mail gibt es kein Konto.',
+    'auth/email-already-in-use': 'Mit dieser E-Mail gibt es schon ein Konto. Melde dich an.', 'auth/weak-password': 'Das Passwort braucht mindestens 6 Zeichen.',
+    'auth/invalid-email': 'Bitte gib eine gültige E-Mail-Adresse ein.', 'auth/missing-password': 'Bitte gib ein Passwort ein.',
+    'auth/too-many-requests': 'Zu viele Versuche. Warte kurz und versuch es nochmal.', 'auth/network-request-failed': 'Keine Verbindung. Prüfe dein Internet.',
+    'auth/operation-not-allowed': 'Diese Anmeldeart ist noch nicht aktiviert.', 'auth/unauthorized-domain': 'Diese Website ist für den Login noch nicht freigegeben.',
+    'auth/popup-blocked': 'Das Anmeldefenster wurde blockiert. Erlaube Pop-ups und versuch es nochmal.' };
+  const err = e => { $('#authErr').textContent = e ? (MSG[e.code] || 'Anmeldung fehlgeschlagen (' + (e.code || e.message) + ').') : ''; $('#authErr').className = 'hint err'; };
+  let mode = 'in';
+  document.querySelectorAll('#authMode button').forEach(b => b.onclick = () => {
+    mode = b.dataset.v; document.querySelectorAll('#authMode button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    $('#authSubmit').textContent = mode === 'in' ? 'Anmelden' : 'Konto erstellen';
+    $('#authPass').autocomplete = mode === 'in' ? 'current-password' : 'new-password'; err(null);
+  });
+  $('#authForm').addEventListener('submit', async e => {
+    e.preventDefault(); err(null);
+    const em = $('#authEmail').value.trim(), pw = $('#authPass').value;
+    $('#authSubmit').disabled = true;
+    try { mode === 'in' ? await A.signInWithEmailAndPassword(auth, em, pw) : await A.createUserWithEmailAndPassword(auth, em, pw); } catch (x) { err(x); }
+    $('#authSubmit').disabled = false;
+  });
+  $('#authGoogle').onclick = async () => {
+    err(null);
+    try { await A.signInWithPopup(auth, new A.GoogleAuthProvider()); }
+    catch (x) { if (x.code !== 'auth/popup-closed-by-user' && x.code !== 'auth/cancelled-popup-request') err(x); }
+  };
+  $('#authReset').onclick = async () => {
+    const em = $('#authEmail').value.trim();
+    if (!em) { $('#authErr').textContent = 'Gib oben deine E-Mail ein und tipp dann nochmal auf „Passwort vergessen?“.'; return; }
+    try { await A.sendPasswordResetEmail(auth, em); $('#authErr').className = 'hint'; $('#authErr').textContent = 'Wir haben dir einen Link zum Zurücksetzen geschickt. Schau auch im Spam-Ordner.'; }
+    catch (x) { err(x); }
+  };
+  A.onAuthStateChanged(auth, user => {
+    const prev = FB.user; FB.user = user;
+    if (user) { $('#authPass').value = ''; if (!prev || prev.uid !== user.uid) { remindedOnce = false; boot(); } }
+    else {
+      profile = null; events = []; stats = { days: {}, answered: 0, right: 0 }; seen = {}; pick = null;
+      ['#pfName', '#pfHs', '#pfStudy'].forEach(s => $(s).value = '');
+      $('#topRight').textContent = 'Clips schauen, Fragen beantworten';
+      showScreen('#auth'); $('#tabbar').hidden = true;
+    }
+  });
+}
+if (IN_CLAUDE || window.LF_NO_LOGIN) boot(); else startWebsite();
 </script>
